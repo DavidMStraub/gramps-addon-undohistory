@@ -24,7 +24,7 @@ jobs:
           pip install pytest gramps-desktop[GUI,i18n] SQLAlchemy
       - name: Copy addon files
         run: |
-          mkdir -p ~/.gramps/gramps52/plugins
-          cp -r UndoHistory ~/.gramps/gramps52/plugins/
+          mkdir -p /home/runner/.gramps/gramps52/plugins
+          cp -r UndoHistory /home/runner/.gramps/gramps52/plugins/
       - name: Test with pytest
         run: pytest
