@@ -21,6 +21,7 @@
 """Unit tests for the Undo History addon."""
 
 import os
+import pickle
 import shutil
 import tempfile
 import time
@@ -150,3 +151,70 @@ class TestUndoHistory(unittest.TestCase):
         commits = self._get_history_table("commits")
         assert len(commits) == 100
         assert self.db.get_number_of_people() == 10
+
+    def test_undo_redo_delete(self):
+        person: Person = next(self.db.iter_people())
+        with DbTxn("Delete person", self.db) as trans:
+            self.db.delete_person_from_database(person, trans)
+        assert self.db.get_number_of_people() == 9
+        transactions = self._get_history_table("transactions")
+        assert len(transactions) == 2
+        commits = self._get_history_table("commits")
+        assert len(commits) == 101
+        self.db.undo()
+        transactions = self._get_history_table("transactions")
+        assert len(transactions) == 3
+        commits = self._get_history_table("commits")
+        assert len(commits) == 101
+        assert self.db.get_number_of_people() == 10
+        self.db.redo()
+        transactions = self._get_history_table("transactions")
+        assert len(transactions) == 4
+        commits = self._get_history_table("commits")
+        assert len(commits) == 101
+        assert self.db.get_number_of_people() == 9
+        commit = commits[-1]
+        assert commit["id"] == 101
+        assert commit["obj_class"] == "Person"
+        assert commit["trans_type"] == 2  # delete
+        assert commit["obj_handle"] == person.handle
+        assert commit["ref_handle"] is None
+        assert commit["new_data"] is None
+        assert pickle.loads(commit["old_data"]) == person.serialize()
+
+    def test_undo_redo_modify(self):
+        person: Person = next(self.db.iter_people())
+        old_person: Person = next(self.db.iter_people())
+        alpha_em = "1/137.036"
+        person.gramps_id = alpha_em
+        with DbTxn("Modify person", self.db) as trans:
+            self.db.commit_person(person, trans)
+        assert self.db.get_number_of_people() == 10
+        new_person = self.db.get_person_from_gramps_id(alpha_em)
+        assert new_person.handle == person.handle
+        assert new_person.change != old_person.handle
+        transactions = self._get_history_table("transactions")
+        assert len(transactions) == 2
+        commits = self._get_history_table("commits")
+        assert len(commits) == 101
+        self.db.undo()
+        transactions = self._get_history_table("transactions")
+        assert len(transactions) == 3
+        commits = self._get_history_table("commits")
+        assert len(commits) == 101
+        assert self.db.get_number_of_people() == 10
+        self.db.redo()
+        transactions = self._get_history_table("transactions")
+        assert len(transactions) == 4
+        commits = self._get_history_table("commits")
+        assert len(commits) == 101
+        assert self.db.get_number_of_people() == 10
+        commit = commits[-1]
+        assert commit["id"] == 101
+        assert commit["obj_class"] == "Person"
+        assert commit["trans_type"] == 1  # modify
+        assert commit["obj_handle"] == person.handle
+        assert commit["ref_handle"] is None
+        assert pickle.loads(commit["new_data"]) == person.serialize()
+        assert pickle.loads(commit["new_data"]) == new_person.serialize()
+        assert pickle.loads(commit["old_data"]) == old_person.serialize()
