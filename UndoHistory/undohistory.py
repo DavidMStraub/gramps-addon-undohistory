@@ -21,7 +21,7 @@
 """SQLite database with undo history."""
 
 import pickle
-import sqlite3
+from contextlib import contextmanager
 from time import time_ns
 from typing import List, Optional
 
@@ -30,8 +30,47 @@ from gramps.gen.db import REFERENCE_KEY, TXNADD, TXNDEL, TXNUPD, DbUndo, DbWrite
 from gramps.gen.db.dbconst import CLASS_TO_KEY_MAP, KEY_TO_CLASS_MAP, KEY_TO_NAME_MAP
 from gramps.gen.db.txn import DbTxn
 from gramps.plugins.db.dbapi.sqlite import SQLite
+from sqlalchemy import BLOB, Column, Integer, Text, create_engine
+from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.sql import func
 
 _ = glocale.translation.gettext
+
+Base = declarative_base()
+
+
+class Undo(Base):
+    __tablename__ = "commits"
+
+    session = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True)
+    obj_class = Column(Text)
+    trans_type = Column(Integer)
+    obj_handle = Column(Text)
+    ref_handle = Column(Text)
+    old_data = Column(BLOB)
+    new_data = Column(BLOB)
+    json = Column(Text)
+    timestamp = Column(Integer)
+
+
+class Session(Base):
+    __tablename__ = "sessions"
+
+    id = Column(Integer, primary_key=True)
+    timestamp = Column(Integer)
+
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    id = Column(Integer, primary_key=True)
+    session = Column(Integer)
+    description = Column(Text)
+    timestamp = Column(Integer)
+    first = Column(Integer)
+    last = Column(Integer)
+    undo = Column(Integer)
 
 
 class SQLiteHistory(SQLite):
@@ -41,20 +80,32 @@ class SQLiteHistory(SQLite):
         """
         Create the undo manager.
         """
-        return DbUndoSQLite(self, self.undolog)
+        path = self.undolog
+        return DbUndoSQL(grampsdb=self, dburl=f"sqlite:///{path}")
 
 
-class DbUndoSQLite(DbUndo):
+class DbUndoSQL(DbUndo):
+    """SQL-based undo database."""
 
-    table_session = "sessions"
-    table_txn = "transactions"
-    table_undo = "commits"
-
-    def __init__(self, grampsdb: DbWriteBase, path: Optional[str] = None) -> None:
+    def __init__(self, grampsdb: DbWriteBase, dburl: str) -> None:
         DbUndo.__init__(self, grampsdb)
-        self.path = path
         self._session_id: Optional[int] = None
         self.undodb: List[bytes] = []
+        self.engine = create_engine(dburl)
+
+    @contextmanager
+    def session_scope(self):
+        """Provide a transactional scope around a series of operations."""
+        Session = sessionmaker(self.engine)
+        session = Session()
+        try:
+            yield session
+            session.commit()
+        except:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     @property
     def session_id(self) -> int:
@@ -63,121 +114,54 @@ class DbUndoSQLite(DbUndo):
             self._session_id = self._make_session_id()
         return self._session_id
 
-    def _connect(self) -> sqlite3.Connection:
-        """Open a SQLite3 connection to the undo database."""
-        return sqlite3.connect(self.path)
-
     def open(self, value=None) -> None:
         """
         Open the backing storage.
         """
-        if self.path:
-            self._create_tables()
-
-    def _create_tables(self) -> None:
-        """Create the tables if they don't exist yet."""
-        with self._connect() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""CREATE TABLE IF NOT EXISTS {self.table_undo} (
-                    session INTEGER,
-                    id INTEGER,
-                    obj_class TEXT,
-                    trans_type INTEGER,
-                    obj_handle TEXT,
-                    ref_handle TEXT,
-                    old_data BLOB,
-                    new_data BLOB,
-                    json TEXT,
-                    timestamp INTEGER,
-                    PRIMARY KEY (session, id)
-                )
-                """
-            )
-            cursor.execute(
-                f"""CREATE TABLE IF NOT EXISTS {self.table_session} (
-                    id INTEGER PRIMARY KEY,
-                    timestamp INTEGER
-                )
-                """
-            )
-            cursor.execute(
-                f"""CREATE TABLE IF NOT EXISTS {self.table_txn} (
-                    id INTEGER PRIMARY KEY,
-                    session INTEGER,
-                    description TEXT,
-                    timestamp INTEGER,
-                    first INTEGER,
-                    last INTEGER,
-                    undo INTEGER
-                )
-                """
-            )
-            return cursor
+        Base.metadata.create_all(self.engine)
 
     def _make_session_id(self) -> int:
         """Insert a row into the session table."""
-        with self._connect() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""INSERT INTO {self.table_session}
-                (timestamp) VALUES (?)""",
-                (time_ns(),),
-            )
-            return cursor.lastrowid
+        with self.session_scope() as session:
+            new_session = Session(timestamp=time_ns())
+            session.add(new_session)
+            session.commit()
+            return new_session.id
 
     def close(self) -> None:
-        """
-        Close the backing storage.
-        """
+        """Close the backing storage."""
         pass
 
     def append(self, value) -> None:
-        """
-        Add a new entry on the end.
-        """
-        if not self.path:
-            self.undodb.append(value)
-            return
+        """Add a new entry on the end."""
         (obj_type, trans_type, handle, old_data, new_data) = pickle.loads(value)
         if isinstance(handle, tuple):
             obj_handle, ref_handle = handle
         else:
             obj_handle, ref_handle = (handle, None)
-        with self._connect() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""INSERT INTO {self.table_undo}
-                (
-                    session,
-                    id,
-                    obj_class,
-                    trans_type,
-                    obj_handle,
-                    ref_handle,
-                    old_data,
-                    new_data,
-                    timestamp
-                ) VALUES ({', '.join(9 * '?')})""",
-                (
-                    self.session_id,
-                    len(self) + 1,
-                    KEY_TO_CLASS_MAP.get(obj_type, str(obj_type)),
-                    trans_type,
-                    obj_handle,
-                    ref_handle,
-                    None if old_data is None else pickle.dumps(old_data, protocol=1),
-                    None if new_data is None else pickle.dumps(new_data, protocol=1),
-                    time_ns(),
-                ),
+        length = len(self)
+        self.session_id
+        with self.session_scope() as session:
+            old_data = None if old_data is None else pickle.dumps(old_data, protocol=1)
+            new_data = None if new_data is None else pickle.dumps(new_data, protocol=1)
+            new_undo = Undo(
+                session=self.session_id,
+                id=length + 1,
+                obj_class=KEY_TO_CLASS_MAP.get(obj_type, str(obj_type)),
+                trans_type=trans_type,
+                obj_handle=obj_handle,
+                ref_handle=ref_handle,
+                old_data=old_data,
+                new_data=new_data,
+                timestamp=time_ns(),
             )
+            session.add(new_undo)
+            session.commit()
 
     def _after_commit(
         self, transaction: DbTxn, undo: bool = False, redo: bool = False
     ) -> None:
         """Post-transaction commit processing."""
-        if not self.path:
-            return
         msg = transaction.get_description()
         if redo:
             msg = _("_Redo %s") % msg
@@ -195,41 +179,56 @@ class DbUndoSQLite(DbUndo):
             last = None
         else:
             last = transaction.last + 1
-        with self._connect() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""INSERT INTO {self.table_txn}
-                (session, description, timestamp, first, last, undo)
-                VALUES (?, ?, ?, ?, ?, ?)""",
-                (self.session_id, msg, timestamp, first, last, int(undo)),
+        self.session_id
+        with self.session_scope() as session:
+            new_transaction = Transaction(
+                session=self.session_id,
+                description=msg,
+                timestamp=timestamp,
+                first=first,
+                last=last,
+                undo=int(undo),
             )
+        session.add(new_transaction)
+        session.commit()
 
     def __getitem__(self, index: int) -> bytes:
         """
         Returns an entry by index number.
         """
-        if not self.path:
-            return self.undodb[index]
-        with self._connect() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""SELECT obj_class, trans_type, obj_handle, ref_handle, old_data, new_data
-                FROM {self.table_undo} WHERE session = ? AND id = ?""",
-                (self.session_id, index + 1),
+        self.session_id
+        with self.session_scope() as session:
+            undo_record = (
+                session.query(Undo)
+                .filter(Undo.session == self.session_id, Undo.id == index + 1)
+                .first()
             )
-            row = cursor.fetchone()
-            if row is None:
+
+            if undo_record is None:
                 raise IndexError("list index out of range")
-            (obj_type, trans_type, obj_handle, ref_handle, old_data, new_data) = row
-            obj_type = int(CLASS_TO_KEY_MAP.get(obj_type, obj_type))
-            old_data = None if old_data is None else pickle.loads(old_data)
-            new_data = None if new_data is None else pickle.loads(new_data)
-            if ref_handle:
-                handle = (obj_handle, ref_handle)
+
+            obj_class = int(
+                CLASS_TO_KEY_MAP.get(undo_record.obj_class, undo_record.obj_class)
+            )
+            old_data = (
+                None
+                if undo_record.old_data is None
+                else pickle.loads(undo_record.old_data)
+            )
+            new_data = (
+                None
+                if undo_record.new_data is None
+                else pickle.loads(undo_record.new_data)
+            )
+
+            if undo_record.ref_handle:
+                handle = (undo_record.obj_handle, undo_record.ref_handle)
             else:
-                handle = obj_handle
+                handle = undo_record.obj_handle
+
             blob_data = pickle.dumps(
-                (obj_type, trans_type, handle, old_data, new_data), protocol=1
+                (obj_class, undo_record.trans_type, handle, old_data, new_data),
+                protocol=1,
             )
             return blob_data
 
@@ -237,55 +236,46 @@ class DbUndoSQLite(DbUndo):
         """
         Set an entry to a value.
         """
-        if not self.path:
-            self.undodb[index] = value
         (obj_type, trans_type, handle, old_data, new_data) = pickle.loads(value)
         if isinstance(handle, tuple):
             obj_handle, ref_handle = handle
         else:
             obj_handle, ref_handle = (handle, None)
-        with self._connect() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"""UPDATE {self.table_undo} SET
-                    obj_class = ?,
-                    trans_type = ?,
-                    obj_handle = ?,
-                    ref_handle = ?,
-                    old_data = ?,
-                    new_data = ?,
-                    timestamp = ?,
-                WHERE
-                    session = ?
-                AND
-                    id = ?
-                """,
-                (
-                    KEY_TO_CLASS_MAP.get(obj_type, str(obj_type)),
-                    trans_type,
-                    obj_handle,
-                    ref_handle,
-                    None if old_data is None else pickle.dumps(old_data, protocol=1),
-                    None if new_data is None else pickle.dumps(new_data, protocol=1),
-                    time_ns(),
-                    self.session_id,
-                    index + 1,
-                ),
+        self.session_id
+        with self.session_scope() as session:
+            undo_record = (
+                session.query(Undo)
+                .filter(Undo.session == self.session_id, Undo.id == index + 1)
+                .first()
             )
 
-    def __len__(self) -> int:
-        """
-        Returns the number of entries.
-        """
-        if not self.path:
-            return len(self.undodb)
-        with self._connect() as connection:
-            cursor = connection.cursor()
-            cursor.execute(
-                f"SELECT MAX(id) FROM {self.table_undo} WHERE session = ?",
-                (self.session_id,),
+            if undo_record is None:
+                raise IndexError("list index out of range")
+
+            undo_record.obj_class = KEY_TO_CLASS_MAP.get(obj_type, str(obj_type))
+            undo_record.trans_type = trans_type
+            undo_record.obj_handle = obj_handle
+            undo_record.ref_handle = ref_handle
+            undo_record.old_data = (
+                pickle.dumps(old_data, protocol=1) if old_data is not None else None
             )
-            return cursor.fetchone()[0] or 0
+            undo_record.new_data = (
+                pickle.dumps(new_data, protocol=1) if new_data is not None else None
+            )
+            undo_record.timestamp = time_ns()
+
+            session.commit()
+
+    def __len__(self) -> int:
+        """Returns the number of entries."""
+        self.session_id
+        with self.session_scope() as session:
+            max_id = (
+                session.query(func.max(Undo.id))
+                .filter(Undo.session == self.session_id)
+                .scalar()
+            )
+        return max_id or 0
 
     def _redo(self, update_history: bool) -> bool:
         """

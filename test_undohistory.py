@@ -42,6 +42,7 @@ from gramps.gen.lib import (
     Source,
     Tag,
 )
+from sqlalchemy import text
 
 DBID = "sqlite+history"
 
@@ -96,11 +97,9 @@ class TestUndoHistory(unittest.TestCase):
     def _get_history_table(self, table_name):
         """Get a table from the history database."""
         dbundo = self.db.get_undodb()
-        with dbundo._connect() as connection:
-            connection.row_factory = dict_factory
-            cursor = connection.cursor()
-            cursor.execute(f"SELECT * FROM {table_name}")
-            return cursor.fetchall()
+        with dbundo.session_scope() as session:
+            res = session.execute(text(f"SELECT * FROM {table_name}"))
+            return res.mappings().all()
 
     def test_initial_sate(self):
         assert self.db.get_number_of_people() == 10
