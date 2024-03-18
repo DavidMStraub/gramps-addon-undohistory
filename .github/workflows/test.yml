@@ -26,6 +26,7 @@ jobs:
         run: |
           mkdir -p ~/.gramps/plugins/gramps52
           cp -r UndoHistory ~/.gramps/plugins/gramps52/
-          ls ~/.gramps/plugins/gramps52/
+          mkdir -p ~/gramps/plugins/gramps52
+          cp -r UndoHistory ~/gramps/plugins/gramps52/
       - name: Test with pytest
         run: pytest
