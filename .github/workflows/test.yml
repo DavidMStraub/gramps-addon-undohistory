@@ -18,8 +18,9 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip wheel gramps-desktop pygobject
-          pip install pytest
+          python -m pip install --upgrade pip wheel
+          sudo apt-get install python3-gi
+          pip install pytest gramps-desktop
       - name: Copy addon files
         run: |
           mkdir -p ~/.gramps/plugins/gramps52
