@@ -27,8 +27,8 @@ register(
     gramps_target_version="5.2",
     status=STABLE,
     fname="undohistory.py",
-    databaseclass="SQLiteHistory",
+    databaseclass="DbUndoSQLite",
     authors=["David Straub"],
     authors_email=["straub@protonmail.com"],
-    #    requires_mod=["SQLAlchemy"],
+    requires_mod=["SQLAlchemy"],
 )

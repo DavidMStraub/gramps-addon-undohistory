@@ -59,6 +59,7 @@ class Session(Base):
 
     id = Column(Integer, primary_key=True)
     timestamp = Column(Integer)
+    treeid = Column(Integer)
 
 
 class Transaction(Base):
@@ -73,13 +74,11 @@ class Transaction(Base):
     undo = Column(Integer)
 
 
-class SQLiteHistory(SQLite):
+class DbUndoSQLite(SQLite):
     """SQLite database backend with undo history."""
 
     def _create_undo_manager(self) -> DbUndo:
-        """
-        Create the undo manager.
-        """
+        """Create the undo manager."""
         path = self.undolog
         return DbUndoSQL(grampsdb=self, dburl=f"sqlite:///{path}")
 
@@ -87,17 +86,20 @@ class SQLiteHistory(SQLite):
 class DbUndoSQL(DbUndo):
     """SQL-based undo database."""
 
-    def __init__(self, grampsdb: DbWriteBase, dburl: str) -> None:
+    def __init__(
+        self, grampsdb: DbWriteBase, dburl: str, treeid: Optional[int] = None
+    ) -> None:
         DbUndo.__init__(self, grampsdb)
         self._session_id: Optional[int] = None
+        self.treeid = None
         self.undodb: List[bytes] = []
         self.engine = create_engine(dburl)
 
     @contextmanager
     def session_scope(self):
         """Provide a transactional scope around a series of operations."""
-        Session = sessionmaker(self.engine)
-        session = Session()
+        SQLSession = sessionmaker(self.engine)
+        session = SQLSession()
         try:
             yield session
             session.commit()
@@ -123,7 +125,7 @@ class DbUndoSQL(DbUndo):
     def _make_session_id(self) -> int:
         """Insert a row into the session table."""
         with self.session_scope() as session:
-            new_session = Session(timestamp=time_ns())
+            new_session = Session(timestamp=time_ns(), treeid=self.treeid)
             session.add(new_session)
             session.commit()
             return new_session.id
@@ -140,12 +142,12 @@ class DbUndoSQL(DbUndo):
         else:
             obj_handle, ref_handle = (handle, None)
         length = len(self)
-        self.session_id
+        session_id = self.session_id  # outside session to prevent lock error
         with self.session_scope() as session:
             old_data = None if old_data is None else pickle.dumps(old_data, protocol=1)
             new_data = None if new_data is None else pickle.dumps(new_data, protocol=1)
             new_undo = Undo(
-                session=self.session_id,
+                session=session_id,
                 id=length + 1,
                 obj_class=KEY_TO_CLASS_MAP.get(obj_type, str(obj_type)),
                 trans_type=trans_type,
@@ -179,10 +181,10 @@ class DbUndoSQL(DbUndo):
             last = None
         else:
             last = transaction.last + 1
-        self.session_id
+        session_id = self.session_id  # outside session to prevent lock error
         with self.session_scope() as session:
             new_transaction = Transaction(
-                session=self.session_id,
+                session=session_id,
                 description=msg,
                 timestamp=timestamp,
                 first=first,
@@ -196,11 +198,11 @@ class DbUndoSQL(DbUndo):
         """
         Returns an entry by index number.
         """
-        self.session_id
+        session_id = self.session_id  # outside session to prevent lock error
         with self.session_scope() as session:
             undo_record = (
                 session.query(Undo)
-                .filter(Undo.session == self.session_id, Undo.id == index + 1)
+                .filter(Undo.session == session_id, Undo.id == index + 1)
                 .first()
             )
 
@@ -241,11 +243,11 @@ class DbUndoSQL(DbUndo):
             obj_handle, ref_handle = handle
         else:
             obj_handle, ref_handle = (handle, None)
-        self.session_id
+        session_id = self.session_id  # outside session to prevent lock error
         with self.session_scope() as session:
             undo_record = (
                 session.query(Undo)
-                .filter(Undo.session == self.session_id, Undo.id == index + 1)
+                .filter(Undo.session == session_id, Undo.id == index + 1)
                 .first()
             )
 
@@ -268,11 +270,11 @@ class DbUndoSQL(DbUndo):
 
     def __len__(self) -> int:
         """Returns the number of entries."""
-        self.session_id
+        session_id = self.session_id  # outside session to prevent lock error
         with self.session_scope() as session:
             max_id = (
                 session.query(func.max(Undo.id))
-                .filter(Undo.session == self.session_id)
+                .filter(Undo.session == session_id)
                 .scalar()
             )
         return max_id or 0
@@ -289,13 +291,14 @@ class DbUndoSQL(DbUndo):
         subitems = transaction.get_recnos()
         # sigs[obj_type][trans_type]
         sigs = [[[] for trans_type in range(3)] for key in range(11)]
+        records = {record_id: self[record_id] for record_id in subitems}
 
         # Process all records in the transaction
         try:
             self.db._txn_begin()
             for record_id in subitems:
                 (key, trans_type, handle, old_data, new_data) = pickle.loads(
-                    self[record_id]
+                    records[record_id]
                 )
 
                 if key == REFERENCE_KEY:
@@ -341,13 +344,14 @@ class DbUndoSQL(DbUndo):
         subitems = transaction.get_recnos(reverse=True)
         # sigs[obj_type][trans_type]
         sigs = [[[] for trans_type in range(3)] for key in range(11)]
+        records = {record_id: self[record_id] for record_id in subitems}
 
         # Process all records in the transaction
         try:
             self.db._txn_begin()
             for record_id in subitems:
                 (key, trans_type, handle, old_data, new_data) = pickle.loads(
-                    self[record_id]
+                    records[record_id]
                 )
 
                 if key == REFERENCE_KEY:
