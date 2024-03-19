@@ -107,7 +107,7 @@ class TestUndoHistory(unittest.TestCase):
         sessions = self._get_history_table("sessions")
         assert len(sessions) == 1
         assert sessions[0]["id"] == 1
-        assert sessions[0]["treeid"] == None
+        assert sessions[0]["treeid"] is None
         assert time.time() - sessions[0]["timestamp"] / 1e9 < 10
         transactions = self._get_history_table("transactions")
         assert len(transactions) == 1
