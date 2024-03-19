@@ -30,5 +30,5 @@ register(
     databaseclass="DbUndoSQLite",
     authors=["David Straub"],
     authors_email=["straub@protonmail.com"],
-    requires_mod=["SQLAlchemy"],
+    # requires_mod=["SQLAlchemy"],
 )
